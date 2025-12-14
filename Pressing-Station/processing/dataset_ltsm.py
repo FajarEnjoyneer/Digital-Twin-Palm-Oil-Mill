@@ -1,64 +1,74 @@
+import os
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
-
-# ==========================================
-# CONFIG
-# ==========================================
-WINDOW_SIZE = 60   # 60 data sebelumnya
+import joblib
+from typing import Optional, Sequence
+WINDOW_SIZE = 60
 STEP_SIZE = 1
-TARGET = "SP6_press"
+OUTPUT_FILENAME = "dataset_lstm.npz"
+SCALER_FILENAME = "dataset_lstm_scaler.gz"
+def create_lstm_dataset(
+        df: pd.DataFrame,
+    output_dir: str,
+    target_column: str,
+    feature_columns: Optional[Sequence[str]] = None,
+    window_size: int = WINDOW_SIZE,
+    step_size: int = STEP_SIZE,
+):
+    print("[INFO] Creating LSTM dataset")
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df = df.set_index("timestamp")
+    elif not isinstance(df.index, pd.DatetimeIndex):
+        raise ValueError("Dataset must have 'timestamp' column or DatetimeIndex")
+    if target_column not in df.columns:
+        raise ValueError(f"Target column '{target_column}' not found in dataset")
 
-# ==========================================
-# LOAD FEATURE ENGINEERED DATA
-# ==========================================
-df = pd.read_csv("dataset_feature_engineered.csv", parse_dates=["timestamp"])
-df = df.set_index("timestamp")
+    if feature_columns is None:
 
-# ==========================================
-# PILIH Fitur untuk LSTM
-# (gunakan fitur yang sudah dibuat sebelumnya)
-# ==========================================
-feature_cols = [
-    "SP6_current",
-    "SP6_press",
-    "current_roll_mean_5",
-    "press_roll_mean_5",
-    "current_delta",
-    "press_delta",
-]
-
-df = df[feature_cols].dropna()
-
-# ==========================================
-# NORMALISASI
-# ==========================================
-scaler = MinMaxScaler()
-scaled = scaler.fit_transform(df)
-scaled_df = pd.DataFrame(scaled, columns=feature_cols, index=df.index)
-
-# ==========================================
-# BUILD WINDOWED DATASET UNTUK LSTM
-# X shape => (samples, window, features)
-# y shape => (samples,)
-# ==========================================
-X, y = [], []
-
-for i in range(0, len(scaled_df) - WINDOW_SIZE, STEP_SIZE):
-    window = scaled_df.iloc[i:i + WINDOW_SIZE].values
-    target_value = scaled_df.iloc[i + WINDOW_SIZE][TARGET]
-    
-    X.append(window)
-    y.append(target_value)
-
-X = np.array(X)
-y = np.array(y)
-
-print("LSTM dataset shape:", X.shape, y.shape)
-
-# ==========================================
-# SAVE DATASET
-# ==========================================
-np.savez("dataset_lstm.npz", X=X, y=y, feature_names=np.array(feature_cols))
-
-print("dataset_lstm.npz berhasil dibuat!")
+        feature_columns = (
+                df.select_dtypes(include=["float", "int"])
+              .columns
+              .drop(target_column)
+              .tolist()
+        )
+    if not feature_columns:
+        raise ValueError("No feature columns available for LSTM")
+    print(f"[INFO] Target  : {target_column}")
+    print(f"[INFO] Features: {feature_columns}")
+    df_model = df[feature_columns + [target_column]].dropna()
+    if len(df_model) <= window_size:
+        raise ValueError("Not enough data for LSTM windowing")
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df_model)
+    scaled_df = pd.DataFrame(
+            scaled,
+        columns=feature_columns + [target_column],
+        index=df_model.index
+    )
+    X, y = [], []
+    for i in range(0, len(scaled_df) - window_size, step_size):
+        X.append(
+                scaled_df.iloc[i:i + window_size][feature_columns].values
+        )
+        y.append(
+                scaled_df.iloc[i + window_size][target_column]
+        )
+    X = np.array(X, dtype=np.float32)
+    y = np.array(y, dtype=np.float32)
+    print(f"[INFO] X shape: {X.shape}, y shape: {y.shape}")
+    os.makedirs(output_dir, exist_ok=True)
+    dataset_path = os.path.join(output_dir, OUTPUT_FILENAME)
+    scaler_path = os.path.join(output_dir, SCALER_FILENAME)
+    np.savez_compressed(
+            dataset_path,
+        X=X,
+        y=y,
+        feature_names=np.array(feature_columns, dtype=object),
+        target_name=target_column
+    )
+    joblib.dump(scaler, scaler_path)
+    print(f"[INFO] Dataset saved : {dataset_path}")
+    print(f"[INFO] Scaler saved  : {scaler_path}")
+    return dataset_path
